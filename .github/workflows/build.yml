@@ -1,0 +1,69 @@
+# Put this file on GitHub at:  .github/workflows/build.yml
+# It compiles user_code.ino every time the tutor uploads it,
+# then publishes firmware.bin for the receiver ESP32 to download.
+name: Build user code
+
+on:
+  push:
+    paths:
+      - "user_code.ino"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      FQBN: esp32:esp32:esp32      # classic ESP32 receiver board
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache ESP32 board package
+        uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: esp32-core-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Install ESP32 board package
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Put the sketch together
+        run: python3 tools/assemble.py
+
+      - name: Compile
+        id: compile
+        run: |
+          set +e
+          arduino-cli compile --fqbn "$FQBN" --output-dir out build/Runner > compile.log 2>&1
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          cat compile.log
+
+      - name: Publish result
+        run: |
+          gh release view latest-build >/dev/null 2>&1 || \
+            gh release create latest-build --title "Latest build" --notes "Built automatically from the C++ Tutor."
+          if [ "${{ steps.compile.outputs.code }}" = "0" ]; then
+            cp out/Runner.ino.bin firmware.bin
+            echo "$GITHUB_SHA" > version.txt
+            printf '%s\nOK\n' "$GITHUB_SHA" > status.txt
+            gh release upload latest-build firmware.bin --clobber
+            gh release upload latest-build version.txt --clobber
+          else
+            printf '%s\nFAIL\n' "$GITHUB_SHA" > status.txt
+            python3 tools/errors.py compile.log >> status.txt
+          fi
+          gh release upload latest-build status.txt --clobber
+          cat status.txt
